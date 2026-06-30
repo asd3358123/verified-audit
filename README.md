@@ -1,5 +1,7 @@
 # verified-audit
 
+**English** | [繁體中文](README.zh-TW.md)
+
 **For security audit, a single strong agent + load-bearing verification matches multi-agent fan-out on recall — at a fraction of the cost. Here is the method, the evidence, and a working Go CI tool.**
 
 Most "AI code audit" does one of two things: floods you with hallucinated findings, or fans out across dozens of agents hoping that volume equals recall. This repo argues — and *measures* — the opposite:
