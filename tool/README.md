@@ -18,13 +18,23 @@ python verified_audit.py --repo /path/to/repo --paths ./internal/handler ./pkg/a
 
 # only what changed since a base commit (diff mode)
 python verified_audit.py --repo /path/to/repo --diff <base_sha> --out report.md
+
+# TRIAGE mode — verify/refute an existing scanner's findings (kills false positives)
+gosec -no-fail -fmt sarif -out gosec.sarif ./...
+python verified_audit.py --repo /path/to/repo --sarif gosec.sarif --out triage.md
 ```
+
+### Two modes
+
+- **Audit** (`--paths` / `--diff`): a strong agent raises findings, then they're verified.
+- **Triage** (`--sarif`): findings come from a scanner you already run (gosec / semgrep / CodeQL); the LLM + deadcode verify or refute each one. Same verification pipeline, so dead-code findings are auto-refuted and verify failures surface as *inconclusive* — never silently cleared. This is usually the cheapest high-value use: most teams drown in SAST false positives, and this kills them with reasons attached. See [`workflows/triage-sast.yml`](workflows/triage-sast.yml).
 
 | flag | default | meaning |
 |---|---|---|
 | `--repo` | `.` | repo root |
 | `--paths` | — | dirs/files to audit (skips `_test.go` and `*.pb.go`) |
 | `--diff <sha>` | — | audit only `.go` files changed since `<sha>` |
+| `--sarif <file>` | — | **triage mode**: verify/refute a scanner's SARIF (gosec/semgrep/CodeQL) instead of auditing from scratch |
 | `--audit-model` | `anthropic/claude-sonnet-4.6` | model for the audit pass |
 | `--verify-model` | `anthropic/claude-sonnet-4.6` | model for the adversarial verify (tier matters less than the harness) |
 | `--concurrency` | `6` | parallel verify calls |

@@ -45,6 +45,8 @@ python tool/verified_audit.py \
 
 To wire it into Gitea / GitHub Actions as a **pre-ship security gate**, see [`tool/README.md`](tool/README.md).
 
+**Or point it at a scanner you already run.** `--sarif gosec.sarif` applies the same verify + reachability layer to gosec / semgrep / CodeQL output to **kill their false positives** (with reasons attached) — usually the cheapest high-value use, since most teams drown in SAST noise.
+
 ## Why this exists (an honesty note)
 
 This started life as a *recursive multi-agent framework*. Its own benchmarks disproved its headline hypothesis — recursive decomposition never beat a single strong agent. What survived, and what this repo is, is the part that held up under measurement: **one strong agent plus verification**. The benchmark that disproved the original idea is included on purpose — the evidence is the point.

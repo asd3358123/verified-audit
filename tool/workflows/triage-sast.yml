@@ -1,0 +1,62 @@
+# Triage mode — run a fast scanner, then verify/refute its findings with the LLM + deadcode.
+# This is the cheapest high-value use of the LLM layer: kill the false positives that gosec /
+# semgrep / CodeQL flood you with, instead of auditing from scratch.
+#
+# Works with any SARIF-emitting scanner (gosec shown; for semgrep use `--sarif -o x.sarif`,
+# for CodeQL use its SARIF output). Needs secret OPENROUTER_API_KEY.
+name: verified-triage
+
+on:
+  push:
+    branches: [release, 'release-*', 'hotfix-*']   # <-- your ship branches
+  workflow_dispatch: {}
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest        # <-- your runner label
+    env:
+      # GOPRIVATE: your-git-host.example.com/*   # <-- uncomment if you have private Go modules
+      GOMEMLIMIT: 3GiB
+      GOGC: "50"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # --- private module access here if needed (see sast.yml) ---
+
+      # 1) run the scanner, emit SARIF (do not fail — we want its findings, not its gate)
+      - name: gosec -> SARIF
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+          "$(go env GOPATH)/bin/gosec" -no-fail -fmt sarif -out gosec.sarif ./... || true
+
+      # 2) deadcode for reachability (dead-code findings get auto-refuted with no LLM call)
+      - name: install deadcode
+        run: |
+          go install golang.org/x/tools/cmd/deadcode@v0.47.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          go mod download
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet openai==2.44.0
+
+      # 3) verify/refute every scanner finding — keep the real ones, kill the false positives
+      - name: verified-triage
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python ci/verified_audit.py \
+            --sarif gosec.sarif \
+            --verify-model anthropic/claude-sonnet-4.6 \
+            --fail-on never \
+            --out triage-report.md
+
+      - name: report to job summary
+        if: always()
+        run: |
+          if [ -f triage-report.md ]; then cat triage-report.md >> "$GITHUB_STEP_SUMMARY"; fi

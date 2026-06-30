@@ -45,6 +45,8 @@ python tool/verified_audit.py \
 
 接進 Gitea / GitHub Actions 當**出貨前安全 gate**,見 [`tool/README.md`](tool/README.md)。
 
+**或者,指向你本來就在跑的掃描器。** `--sarif gosec.sarif` 把同一套 verify + 可達性層套在 gosec / semgrep / CodeQL 的輸出上,**砍掉它們的誤報**(還附理由)—— 通常這才是最划算的用法,因為多數團隊都被 SAST 噪音淹死。
+
 ## 這東西為什麼存在(一段誠實話)
 
 它一開始是個*遞迴 multi-agent 框架*。它自己的 benchmark 否證了它的核心假設 —— 遞迴分解從沒贏過單一強 agent。活下來、也就是這個 repo 的,是經得起量測的那塊:**單一強 agent + 驗證**。那個證偽原始想法的 benchmark 是**刻意**收進來的 —— 證據本身就是重點。

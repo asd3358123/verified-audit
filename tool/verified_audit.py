@@ -286,10 +286,14 @@ def verify_one(cli: OpenAI, repo: str, f: dict, model: str) -> dict:
 def render(paths: list[str], findings: list[dict], confirmed: list[dict], refuted: list[dict],
            inconclusive: list[dict], audit_failed: int, audit_total: int) -> str:
     L = ["# Verified Audit Report", ""]
-    # 掃描完整性橫幅 —— 失敗「絕不能」看起來像乾淨掃過。
+    # Scan-completeness banner — a failure must NEVER look like a clean scan.
     if audit_failed or inconclusive:
-        L += [f"> ⚠️ **SCAN INCOMPLETE** — {audit_failed}/{audit_total} audit batch(es) failed to parse; "
-              f"{len(inconclusive)} finding(s) could not be verified. "
+        parts = []
+        if audit_total and audit_failed:
+            parts.append(f"{audit_failed}/{audit_total} audit batch(es) failed to parse")
+        if inconclusive:
+            parts.append(f"{len(inconclusive)} finding(s) could not be verified")
+        L += [f"> ⚠️ **SCAN INCOMPLETE** — {'; '.join(parts)}. "
               "Absence of findings below does NOT mean the code is clean.", ""]
     L += [f"- **scope:** {', '.join(paths)}",
           f"- **raised:** {len(findings)} · **confirmed:** {len(confirmed)} · "
@@ -318,6 +322,35 @@ def render(paths: list[str], findings: list[dict], confirmed: list[dict], refute
     return "\n".join(L) + "\n"
 
 
+# ── SARIF triage (verify/refute an existing scanner's findings) ──────────────────
+def load_sarif(path: str, repo: str) -> list[dict]:
+    """Parse a SARIF file (gosec / semgrep / CodeQL) into findings for the verify pipeline — so the
+    LLM + deadcode triage an existing scanner's alerts instead of auditing from scratch."""
+    try:
+        doc = json.load(open(path))
+    except Exception as e:  # noqa: BLE001
+        sys.exit(f"error: cannot read SARIF {path}: {e}")
+    level_to_sev = {"error": "high", "warning": "medium", "note": "low", "none": "low"}
+    out: list[dict] = []
+    for run in doc.get("runs", []):
+        tool = ((run.get("tool") or {}).get("driver") or {}).get("name", "scanner")
+        for r in run.get("results", []):
+            loc = ((r.get("locations") or [{}])[0] or {}).get("physicalLocation", {})
+            uri = ((loc.get("artifactLocation") or {}).get("uri") or "").replace("file://", "")
+            if not uri:
+                continue
+            out.append({
+                "file": _norm_repo_path(uri, repo),
+                "line": (loc.get("region") or {}).get("startLine") or 0,
+                "type": r.get("ruleId") or "finding",
+                "attack": ((r.get("message") or {}).get("text") or "").strip(),
+                "severity": level_to_sev.get(r.get("level", "warning"), "medium"),
+                "evidence": "",
+                "tool": tool,
+            })
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="headless verified-audit for CI (OpenRouter + deadcode)")
     ap.add_argument("--repo", default=".")
@@ -326,20 +359,34 @@ def main() -> int:
     ap.add_argument("--audit-model", default="anthropic/claude-sonnet-4.6")
     ap.add_argument("--verify-model", default="anthropic/claude-sonnet-4.6")
     ap.add_argument("--concurrency", type=int, default=6)
+    ap.add_argument("--sarif", default=None,
+                    help="triage an existing scanner's SARIF (gosec/semgrep/CodeQL) instead of auditing from scratch")
     ap.add_argument("--out", default="audit-report.md")
     ap.add_argument("--fail-on", choices=["never", "confirmed"], default="never")
     a = ap.parse_args()
-    if not a.paths and not a.diff:
-        ap.error("give --paths or --diff")
+    if not a.paths and not a.diff and not a.sarif:
+        ap.error("give --paths, --diff, or --sarif")
 
     repo = os.path.abspath(a.repo)
-    files = changed_go_files(repo, a.diff) if a.diff else expand(repo, a.paths or [])
-    if not files:
-        open(a.out, "w").write("# Verified Audit Report\n\n_no Go files in scope_\n")
+    cli = make_client()
+
+    if a.sarif:                                  # triage mode: findings come from the scanner
+        findings = load_sarif(a.sarif, repo)
+        audit_failed, audit_total = 0, 0
+        scope = [f"SARIF triage: {os.path.basename(a.sarif)}"]
+        print(f"[info] loaded {len(findings)} finding(s) from SARIF", file=sys.stderr)
+    else:                                        # audit mode: a strong agent raises findings
+        files = changed_go_files(repo, a.diff) if a.diff else expand(repo, a.paths or [])
+        if not files:
+            open(a.out, "w").write("# Verified Audit Report\n\n_no Go files in scope_\n")
+            return 0
+        findings, audit_failed, audit_total = run_audit(cli, repo, files, a.audit_model)
+        scope = files if a.diff else (a.paths or [])
+
+    if not findings:
+        open(a.out, "w").write("# Verified Audit Report\n\n_no findings to verify_\n")
         return 0
 
-    cli = make_client()
-    findings, audit_failed, audit_total = run_audit(cli, repo, files, a.audit_model)
     dead = load_deadcode(repo)
 
     # pure-code reachability: dead-code findings are auto-refuted (no LLM call). Match by
@@ -373,8 +420,7 @@ def main() -> int:
     if inconclusive:
         print(f"[warn] {len(inconclusive)} finding(s) could not be verified (LLM failure) — reported as inconclusive", file=sys.stderr)
 
-    md = render(files if a.diff else (a.paths or []), findings, confirmed, refuted,
-                inconclusive, audit_failed, audit_total)
+    md = render(scope, findings, confirmed, refuted, inconclusive, audit_failed, audit_total)
     with open(a.out, "w") as fh:
         fh.write(md)
     print(md)
