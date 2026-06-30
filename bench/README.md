@@ -23,7 +23,22 @@ python harness.py --task vuln-api --model anthropic/claude-sonnet-4.6
 
 ## The result
 
-The included fixtures reproduce the **direction** (single ≥ fan-out). The headline numbers below come from the **original** experiment — a richer bounded-depth *tree* orchestrator (with adversarial verification) that is **not part of this repo**; they're reported here as the fuller evidence:
+### Self-contained reproduction (run `harness.py` yourself)
+
+One run on `anthropic/claude-sonnet-4.6` over the three bundled fixtures (numbers vary run to run; temperature 0):
+
+| task | defects | single agent | naive fan-out |
+|---|---|---|---|
+| `microservices` | 16 | 15 | 16 |
+| `vuln-api` | 4 | 4 | 4 |
+| `web-shop` | 8 | 7 | 6 |
+| **total** | **28** | **26** | **26** |
+
+Recall **ties** (26/28 each) — but the fan-out spent **~8× the LLM calls** to get there (one call per file = ~24, vs one call per repo = 3). At this scale, decomposition buys nothing it didn't already have; it just costs more. That is the whole point: *more agents ≠ more recall, only more spend.* (This harness scores recall and call count; it does not score the false-positive **noise** fan-out adds — see the headline numbers below, which do.)
+
+### Original experiment (richer orchestrator, reported)
+
+The headline numbers below come from the **original** experiment — a richer bounded-depth *tree* orchestrator (with adversarial verification) that is **not part of this repo**; reported here as the fuller evidence, including the noise fan-out generates:
 
 | condition | single strong agent | recursive fan-out |
 |---|---|---|
