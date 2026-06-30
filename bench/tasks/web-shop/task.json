@@ -1,0 +1,14 @@
+{
+  "prompt": "Audit this Python web-shop codebase (auth.py, api.py, payments.py, storage.py, crypto_utils.py) for security and correctness vulnerabilities. Cover every module. For each issue give the file:line and the concrete attack or impact.",
+  "mode": "audit",
+  "defects": [
+    {"file": "auth.py", "line": 8, "keyword": "sha", "note": "SHA-1 unsalted password hashing"},
+    {"file": "auth.py", "line": 12, "keyword": "token", "note": "predictable/forgeable token (user id + timestamp)"},
+    {"file": "api.py", "line": 9, "keyword": "inject", "note": "SQL injection via string concat in search_products"},
+    {"file": "api.py", "line": 14, "keyword": "order", "note": "IDOR: get_order ignores current_user (+ SQLi via f-string)"},
+    {"file": "payments.py", "line": 2, "keyword": "float", "note": "float arithmetic for money"},
+    {"file": "payments.py", "line": 9, "keyword": "refund", "note": "refund has no amount validation (negative / over-refund)"},
+    {"file": "storage.py", "line": 7, "keyword": "traversal", "note": "path traversal via unsanitized filename"},
+    {"file": "crypto_utils.py", "line": 3, "keyword": "hardcod", "note": "hardcoded encryption key"}
+  ]
+}

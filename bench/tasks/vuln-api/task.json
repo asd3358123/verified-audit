@@ -1,0 +1,10 @@
+{
+  "prompt": "Audit this small Flask app (app.py, auth.py) for security vulnerabilities. For each issue give the file:line and the concrete attack.",
+  "mode": "audit",
+  "defects": [
+    {"file": "app.py", "line": 12, "keyword": "inject", "note": "SQL injection via f-string query"},
+    {"file": "app.py", "line": 24, "keyword": "auth", "note": "/admin/users has no authentication"},
+    {"file": "auth.py", "line": 5, "keyword": "md5", "note": "MD5 used for password hashing"},
+    {"file": "auth.py", "line": 9, "keyword": "token", "note": "predictable/forgeable token = user id"}
+  ]
+}

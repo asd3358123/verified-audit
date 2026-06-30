@@ -1,0 +1,22 @@
+{
+  "prompt": "Audit this microservices codebase for security and correctness vulnerabilities. It has several independent services (auth, payments, users, notifications, gateway, shared). Cover EVERY service thoroughly — subtle logic flaws matter as much as obvious ones. For each issue give the file:line and the concrete attack.",
+  "mode": "audit",
+  "defects": [
+    {"file": "auth/login.py", "line": 11, "keyword": "enumerat", "note": "username enumeration via distinct error messages"},
+    {"file": "auth/tokens.py", "line": 13, "keyword": "signature", "note": "JWT/token signature never verified"},
+    {"file": "auth/password.py", "line": 5, "keyword": "md5", "note": "MD5 unsalted password hashing"},
+    {"file": "payments/checkout.py", "line": 8, "keyword": "price", "note": "price taken from client request (trusts client)"},
+    {"file": "payments/refund.py", "line": 6, "keyword": "refund", "note": "refund with no amount/ownership/idempotency check"},
+    {"file": "payments/wallet.py", "line": 13, "keyword": "race", "note": "TOCTOU race: read balance then non-atomic write"},
+    {"file": "users/profile.py", "line": 6, "keyword": "idor", "note": "IDOR: requester_id ignored, returns any user's PII"},
+    {"file": "users/admin.py", "line": 6, "keyword": "authoriz", "note": "delete_user has no role/authorization check"},
+    {"file": "users/search.py", "line": 5, "keyword": "inject", "note": "SQL injection via string concatenation"},
+    {"file": "notifications/email.py", "line": 5, "keyword": "header", "note": "email header/CRLF injection via unsanitized fields"},
+    {"file": "notifications/webhook.py", "line": 6, "keyword": "ssrf", "note": "SSRF: fetches user-supplied webhook URL"},
+    {"file": "gateway/router.py", "line": 2, "keyword": "bypass", "note": "auth bypass: startswith check defeated by path normalization"},
+    {"file": "gateway/ratelimit.py", "line": 5, "keyword": "forwarded", "note": "rate limit keyed on spoofable X-Forwarded-For"},
+    {"file": "shared/db.py", "line": 3, "keyword": "hardcod", "note": "hardcoded DB credentials in DSN"},
+    {"file": "shared/crypto.py", "line": 4, "keyword": "iv", "note": "static/reused IV with CBC"},
+    {"file": "shared/validation.py", "line": 6, "keyword": "redos", "note": "ReDoS: catastrophic-backtracking email regex"}
+  ]
+}
