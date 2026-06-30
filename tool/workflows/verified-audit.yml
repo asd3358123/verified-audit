@@ -1,0 +1,66 @@
+# Stage 2 — LLM verified-audit. Finds the logic / authz bugs scanners miss
+# (IDOR, missing-auth, TOCTOU, injection) and adversarially triages them.
+# Advisory by default: writes a report to the job summary, never blocks the build.
+#
+# Reachability is deterministic (deadcode); the LLM only judges semantics on
+# reachable code. See ../verified_audit.py and ../../METHODOLOGY.md.
+#
+# Needs secret OPENROUTER_API_KEY. Same trigger caveat as sast.yml: the workflow
+# must exist on the branch you push.
+name: verified-audit
+
+on:
+  push:
+    branches: [release, 'release-*', 'hotfix-*']   # <-- your ship branches
+  workflow_dispatch: {}
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest        # <-- your runner label
+    env:
+      # GOPRIVATE: your-git-host.example.com/*   # <-- uncomment if you have private Go modules
+      GOMEMLIMIT: 3GiB
+      GOGC: "50"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # --- delete this step if you have no private Go modules ---
+      # - name: private module access
+      #   env:
+      #     GOPRIVATE_TOKEN: ${{ secrets.GOPRIVATE_TOKEN }}
+      #   run: |
+      #     git config --global url."https://oauth2:${GOPRIVATE_TOKEN}@your-git-host.example.com/".insteadOf "https://your-git-host.example.com/"
+      - name: install deadcode (pinned)
+        run: |
+          go install golang.org/x/tools/cmd/deadcode@v0.47.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          go mod download
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet openai==2.44.0
+
+      - name: verified-audit (advisory)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python ci/verified_audit.py \
+            --paths ./internal/handler ./pkg/auth \
+            --audit-model anthropic/claude-sonnet-4.6 \
+            --verify-model anthropic/claude-sonnet-4.6 \
+            --fail-on never \
+            --out audit-report.md
+
+      # Gitea (GHES-like) does not support upload-artifact@v4 — write to the job summary instead.
+      - name: report to job summary
+        if: always()
+        run: |
+          if [ -f audit-report.md ]; then cat audit-report.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      # To turn it into a hard gate: change --fail-on never to --fail-on confirmed
+      # (exits 1 on a confirmed finding OR an incomplete scan). Start advisory.

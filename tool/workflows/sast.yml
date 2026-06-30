@@ -1,0 +1,69 @@
+# Stage 1 — free SAST on first-party code (gitleaks + gosec + semgrep).
+# Pairs with, does not replace, any dependency/CVE scanner you already run.
+#
+# Trigger model = "pre-ship gate": fires on the branches you actually ship.
+# ⚠️ Actions reads the workflow from the *pushed branch* — this file must exist
+#    on every branch you want to gate, not just the default branch.
+#
+# Adjust the marked <-- spots: branches, runs-on, GOPRIVATE, and the high-risk dirs.
+name: sast-secrets
+
+on:
+  push:
+    branches: [release, 'release-*', 'hotfix-*']   # <-- your ship branches
+  workflow_dispatch: {}
+
+jobs:
+  sast:
+    runs-on: ubuntu-latest        # <-- your runner label (e.g. a self-hosted label)
+    env:
+      # GOPRIVATE: your-git-host.example.com/*   # <-- uncomment if you have private Go modules
+      GOMEMLIMIT: 3GiB            # whole-program analysis is memory-hungry on big repos
+      GOGC: "50"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 1) committed secrets — gitleaks (HARD gate). Scans only commits not on the
+      #    default branch, so a repo's historical secret backlog doesn't keep it red.
+      - name: gitleaks (new commits vs main)
+        run: |
+          V=8.21.0
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz" \
+            | tar -xz -C /tmp gitleaks
+          git fetch -q origin main:refs/remotes/origin/main || true
+          if git rev-parse --verify -q origin/main >/dev/null; then
+            RANGE="HEAD --not origin/main"
+          else
+            echo "::warning::origin/main unavailable — scanning HEAD commit only"
+            RANGE="-1"
+          fi
+          /tmp/gitleaks detect --source . --redact --exit-code 1 --log-opts="$RANGE"
+
+      # 2) Go SAST — gosec (advisory; drop the trailing `|| true` to make it a hard gate).
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # --- delete this step if you have no private Go modules ---
+      # - name: private module access
+      #   env:
+      #     GOPRIVATE_TOKEN: ${{ secrets.GOPRIVATE_TOKEN }}
+      #   run: |
+      #     git config --global url."https://oauth2:${GOPRIVATE_TOKEN}@your-git-host.example.com/".insteadOf "https://your-git-host.example.com/"
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+          "$(go env GOPATH)/bin/gosec" -severity medium -confidence medium -quiet \
+            ./internal/... || true       # <-- your high-risk dirs (or ./... for the whole repo)
+
+      # 3) semgrep (advisory).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: semgrep
+        run: |
+          pip install --quiet semgrep==1.168.0
+          semgrep --config p/golang --config p/security-audit --config p/secrets --quiet \
+            internal || true             # <-- your high-risk dirs
