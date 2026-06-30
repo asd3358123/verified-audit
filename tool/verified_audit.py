@@ -267,10 +267,16 @@ def run_audit(cli: OpenAI, repo: str, files: list[str], model: str) -> tuple[lis
 
 def verify_one(cli: OpenAI, repo: str, f: dict, model: str) -> dict:
     line = _safe_int(f.get("line"))
+    code = window(repo, f.get("file", ""), line)
+    if not code.strip():
+        # can't locate the cited code (bad/ambiguous path) → INCONCLUSIVE, never a silent refute:
+        # "I couldn't see the code" must not masquerade as "it's a false positive".
+        print(f"[warn] cannot locate {f.get('file')}:{f.get('line')} — reporting inconclusive", file=sys.stderr)
+        return {**f, "verdict": {}}
     name = enclosing_func(repo, f.get("file", ""), line)[0] or "?"
     user = (
         f"Claim: \"{f.get('type')} — {f.get('attack')}\" at {f.get('file')}:{f.get('line')}.\n\n"
-        f"Cited code (line-numbered):\n{window(repo, f.get('file', ''), line)}\n\n"
+        f"Cited code (line-numbered):\n{code}\n\n"
         f"REACHABILITY (deterministic): {name}() is reachable from a program entry point.\n"
         f"{caller_context(repo, name)}\n\n"
         "Judge the SEMANTICS. real=true ONLY if: (a) the cited line literally contains the described flaw; "
@@ -323,24 +329,46 @@ def render(paths: list[str], findings: list[dict], confirmed: list[dict], refute
 
 
 # ── SARIF triage (verify/refute an existing scanner's findings) ──────────────────
+def _go_basename_index(repo: str) -> dict:
+    idx: dict = {}
+    for dp, _, fs in os.walk(repo):
+        if os.sep + ".git" in dp:
+            continue
+        for f in fs:
+            if f.endswith(".go"):
+                idx.setdefault(f, []).append(os.path.relpath(os.path.join(dp, f), repo))
+    return idx
+
+
 def load_sarif(path: str, repo: str) -> list[dict]:
-    """Parse a SARIF file (gosec / semgrep / CodeQL) into findings for the verify pipeline — so the
-    LLM + deadcode triage an existing scanner's alerts instead of auditing from scratch."""
+    """Parse a SARIF file (gosec / semgrep / CodeQL) into findings for the verify pipeline. Resolves
+    each location to a real repo file — some scanners (e.g. gosec) emit only the basename, so we map
+    it back via a basename index. An ambiguous (same basename in >1 dir) or unknown path is left
+    as-is; it will surface as INCONCLUSIVE at verify time, never silently 'refuted'."""
     try:
         doc = json.load(open(path))
     except Exception as e:  # noqa: BLE001
         sys.exit(f"error: cannot read SARIF {path}: {e}")
+    idx = _go_basename_index(repo)
     level_to_sev = {"error": "high", "warning": "medium", "note": "low", "none": "low"}
+
+    def _resolve(uri: str) -> str:
+        p = _norm_repo_path(uri.replace("file://", ""), repo)
+        if os.path.isfile(os.path.join(repo, p)):
+            return p
+        cands = idx.get(os.path.basename(p), [])
+        return cands[0] if len(cands) == 1 else p   # unique basename → resolve; else leave as-is
+
     out: list[dict] = []
     for run in doc.get("runs", []):
         tool = ((run.get("tool") or {}).get("driver") or {}).get("name", "scanner")
         for r in run.get("results", []):
             loc = ((r.get("locations") or [{}])[0] or {}).get("physicalLocation", {})
-            uri = ((loc.get("artifactLocation") or {}).get("uri") or "").replace("file://", "")
+            uri = (loc.get("artifactLocation") or {}).get("uri") or ""
             if not uri:
                 continue
             out.append({
-                "file": _norm_repo_path(uri, repo),
+                "file": _resolve(uri),
                 "line": (loc.get("region") or {}).get("startLine") or 0,
                 "type": r.get("ruleId") or "finding",
                 "attack": ((r.get("message") or {}).get("text") or "").strip(),
