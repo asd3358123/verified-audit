@@ -45,7 +45,7 @@ python tool/verified_audit.py \
 
 To wire it into Gitea / GitHub Actions as a **pre-ship security gate**, see [`tool/README.md`](tool/README.md).
 
-**Or point it at a scanner you already run.** `--sarif gosec.sarif` applies the same verify + reachability layer to gosec / semgrep / CodeQL output to **kill their false positives** (with reasons attached) — usually the cheapest high-value use, since most teams drown in SAST noise.
+**Or point it at a scanner you already run.** `--sarif gosec.sarif` applies the same verify + reachability layer to gosec / semgrep / CodeQL output to **kill their false positives** (with reasons attached) — usually the cheapest high-value use, since most teams drown in SAST noise. On the open-source [ffuf](https://github.com/ffuf/ffuf), this refuted **16 of gosec's 25 findings** as false positives, each with a reason, keeping the real ones ([worked example](examples/triage-demo.md)).
 
 ## Why this exists (an honesty note)
 

@@ -45,7 +45,7 @@ python tool/verified_audit.py \
 
 接進 Gitea / GitHub Actions 當**出貨前安全 gate**,見 [`tool/README.md`](tool/README.md)。
 
-**或者,指向你本來就在跑的掃描器。** `--sarif gosec.sarif` 把同一套 verify + 可達性層套在 gosec / semgrep / CodeQL 的輸出上,**砍掉它們的誤報**(還附理由)—— 通常這才是最划算的用法,因為多數團隊都被 SAST 噪音淹死。
+**或者,指向你本來就在跑的掃描器。** `--sarif gosec.sarif` 把同一套 verify + 可達性層套在 gosec / semgrep / CodeQL 的輸出上,**砍掉它們的誤報**(還附理由)—— 通常這才是最划算的用法,因為多數團隊都被 SAST 噪音淹死。在開源的 [ffuf](https://github.com/ffuf/ffuf) 上,這把 gosec 的 **25 條砍掉 16 條誤報**、每條附理由、留下真的([實例](examples/triage-demo.md))。
 
 ## 這東西為什麼存在(一段誠實話)
 
