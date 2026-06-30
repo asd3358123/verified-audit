@@ -29,12 +29,24 @@ python verified_audit.py --repo /path/to/repo --sarif gosec.sarif --out triage.m
 - **Audit** (`--paths` / `--diff`): a strong agent raises findings, then they're verified.
 - **Triage** (`--sarif`): findings come from a scanner you already run (gosec / semgrep / CodeQL); the LLM + deadcode verify or refute each one. Same verification pipeline, so dead-code findings are auto-refuted and verify failures surface as *inconclusive* — never silently cleared. This is usually the cheapest high-value use: most teams drown in SAST false positives, and this kills them with reasons attached. See [`workflows/triage-sast.yml`](workflows/triage-sast.yml), and a worked example on the open-source ffuf (25 gosec alerts → 9 kept, 16 false positives refuted): [`../examples/triage-demo.md`](../examples/triage-demo.md).
 
+### Languages (`--lang`)
+
+Audit, verify, and triage work on **`go` / `python` / `javascript` / `typescript`** (and triage over `--sarif` works on any language your scanner — semgrep, CodeQL — emits SARIF for).
+
+The **deterministic dead-code reachability is Go-only on purpose.** Go's `deadcode` gives a *sound* whole-program call graph; for dynamic languages, an unsound dead-code heuristic would risk *false negatives* — auto-refuting a finding that's actually reachable, which is the dangerous failure mode for a security gate. So for non-Go, there's no dead-code auto-refute; every finding goes through the adversarial verify. You still get the verification and fail-loud guarantees, just not the free reachability filter.
+
+```bash
+python verified_audit.py --repo /path/to/python/repo --paths ./app --lang python --out report.md
+python verified_audit.py --repo /path/to/repo --sarif semgrep.sarif --lang typescript --out triage.md
+```
+
 | flag | default | meaning |
 |---|---|---|
 | `--repo` | `.` | repo root |
 | `--paths` | — | dirs/files to audit (skips `_test.go` and `*.pb.go`) |
 | `--diff <sha>` | — | audit only `.go` files changed since `<sha>` |
 | `--sarif <file>` | — | **triage mode**: verify/refute a scanner's SARIF (gosec/semgrep/CodeQL) instead of auditing from scratch |
+| `--lang` | `go` | `go` / `python` / `javascript` / `typescript`. Go gets deterministic dead-code reachability; the others rely on the verify pass |
 | `--audit-model` | `anthropic/claude-sonnet-4.6` | model for the audit pass |
 | `--verify-model` | `anthropic/claude-sonnet-4.6` | model for the adversarial verify (tier matters less than the harness) |
 | `--concurrency` | `6` | parallel verify calls |

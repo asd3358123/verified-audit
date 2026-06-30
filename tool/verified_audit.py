@@ -123,28 +123,53 @@ def window(repo: str, file: str, line: int, pad: int = 30) -> str:
     return "\n".join(f"{i}: {lines[i - 1]}" for i in range(a + 1, b + 1))
 
 
-def _auditable_go(fn: str) -> bool:
-    # 只審第一方手寫 Go：跳過 generated protobuf(.pb.go) 與 test(_test.go) —— 審它們是噪音。
-    return fn.endswith(".go") and not fn.endswith("_test.go") and not fn.endswith(".pb.go")
+# Language config. Audit + adversarial verify + SARIF triage work on ANY of these. The deterministic
+# dead-code reachability (deadcode) is Go-only ON PURPOSE: Go is the only one here with a *sound*
+# whole-program call graph. For dynamic languages an unsound dead-code heuristic would risk
+# false-negatives (the dangerous direction for a security gate), so there we rely on the verify pass.
+LANGS = {
+    "go":         {"exts": (".go",),                "func_re": (r"\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z0-9_]+)\s*(?:\[[^\]]*\])?\s*\(",)},
+    "python":     {"exts": (".py",),                "func_re": (r"\s*(?:async\s+)?def\s+([A-Za-z0-9_]+)\s*\(",)},
+    "javascript": {"exts": (".js", ".jsx", ".mjs"), "func_re": (r"\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_]+)\s*\(",
+                                                                 r"\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?\(?[^=]*=>")},
+    "typescript": {"exts": (".ts", ".tsx"),         "func_re": (r"\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_]+)\s*\(",
+                                                                 r"\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?\(?[^=]*=>")},
+}
 
 
-def expand(repo: str, paths: list[str]) -> list[str]:
+def _is_test_or_gen(fn: str, lang: str) -> bool:
+    b = os.path.basename(fn)
+    if lang == "go":
+        return b.endswith("_test.go") or b.endswith(".pb.go")
+    if lang == "python":
+        return b.startswith("test_") or b.endswith("_test.py")
+    if lang in ("javascript", "typescript"):
+        return ".test." in b or ".spec." in b or b.endswith(".d.ts")
+    return False
+
+
+def _auditable(fn: str, lang: str) -> bool:
+    # first-party hand-written source only — skip tests and generated files (noise).
+    return fn.endswith(LANGS[lang]["exts"]) and not _is_test_or_gen(fn, lang)
+
+
+def expand(repo: str, paths: list[str], lang: str) -> list[str]:
     out: list[str] = []
     for p in paths:
         ap = os.path.join(repo, p)
         if os.path.isdir(ap):
             for dp, _, fs in os.walk(ap):
-                out += [os.path.relpath(os.path.join(dp, f), repo) for f in fs if _auditable_go(f)]
-        elif _auditable_go(ap) and os.path.isfile(ap):
+                out += [os.path.relpath(os.path.join(dp, f), repo) for f in fs if _auditable(f, lang)]
+        elif _auditable(ap, lang) and os.path.isfile(ap):
             out.append(p)
     return sorted(set(out))
 
 
-def changed_go_files(repo: str, base: str) -> list[str]:
+def changed_files(repo: str, base: str, lang: str) -> list[str]:
     r = subprocess.run(["git", "-C", repo, "diff", "--name-only", f"{base}...HEAD"],
                        capture_output=True, text=True)
     return [p for p in r.stdout.splitlines()
-            if _auditable_go(p) and os.path.isfile(os.path.join(repo, p))]
+            if _auditable(p, lang) and os.path.isfile(os.path.join(repo, p))]
 
 
 # ── reachability (pure code: deadcode) ──────────────────────────────────────────
@@ -173,12 +198,14 @@ def _norm_repo_path(p: str, repo: str) -> str:
     return os.path.normpath(p)
 
 
-def load_deadcode(repo: str) -> set | None:
+def load_deadcode(repo: str, lang: str = "go") -> set | None:
     """Run `deadcode ./...` (whole-program). Return {(repo_relpath, decl_line)} of unreachable funcs.
     Matched by PRECISE position (file + declaration line), NOT just function name — so a same-named
     *reachable* func in the same file is never mistakenly auto-refuted (a false-negative is the
-    dangerous failure mode in a security gate). None if deadcode can't run (then we don't trust the
-    dead-code signal and everything goes to LLM verify)."""
+    dangerous failure mode in a security gate). Returns None for non-Go languages (no sound
+    whole-program tool — see LANGS) or if deadcode can't run; then everything goes to LLM verify."""
+    if lang != "go":
+        return None
     b = _deadcode_bin()
     if not b:
         print("[warn] `deadcode` not found — dead-code auto-refute disabled. "
@@ -199,15 +226,17 @@ def load_deadcode(repo: str) -> set | None:
     return dead
 
 
-def enclosing_func(repo: str, file: str, line: int) -> tuple[str | None, int | None]:
-    """Return (func_name, decl_line) of the function enclosing `line`, or (None, None).
-    decl_line is matched against deadcode's reported position for precise dead-code attribution."""
+def enclosing_func(repo: str, file: str, line: int, lang: str = "go") -> tuple[str | None, int | None]:
+    """Return (func_name, decl_line) of the function enclosing `line`, or (None, None). decl_line is
+    matched against deadcode's reported position for precise dead-code attribution (Go). The Go
+    pattern allows generic type params `func Foo[T any](...)`; other languages use their own."""
     lines = _read(os.path.join(repo, file))
+    pats = [re.compile(p) for p in LANGS.get(lang, LANGS["go"])["func_re"]]
     for i in range(min(line, len(lines)) - 1, -1, -1):
-        # 容許泛型型別參數 func Foo[T any](...) —— 否則泛型函式匹配不到、dead-code 行號對不上
-        m = re.match(r"\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z0-9_]+)\s*(?:\[[^\]]*\])?\s*\(", lines[i])
-        if m:
-            return m.group(1), i + 1
+        for pat in pats:
+            m = pat.match(lines[i])
+            if m:
+                return m.group(1), i + 1
     return None, None
 
 
@@ -265,7 +294,7 @@ def run_audit(cli: OpenAI, repo: str, files: list[str], model: str) -> tuple[lis
     return findings, failed, len(bs)
 
 
-def verify_one(cli: OpenAI, repo: str, f: dict, model: str) -> dict:
+def verify_one(cli: OpenAI, repo: str, f: dict, model: str, lang: str = "go") -> dict:
     line = _safe_int(f.get("line"))
     code = window(repo, f.get("file", ""), line)
     if not code.strip():
@@ -273,7 +302,7 @@ def verify_one(cli: OpenAI, repo: str, f: dict, model: str) -> dict:
         # "I couldn't see the code" must not masquerade as "it's a false positive".
         print(f"[warn] cannot locate {f.get('file')}:{f.get('line')} — reporting inconclusive", file=sys.stderr)
         return {**f, "verdict": {}}
-    name = enclosing_func(repo, f.get("file", ""), line)[0] or "?"
+    name = enclosing_func(repo, f.get("file", ""), line, lang)[0] or "?"
     user = (
         f"Claim: \"{f.get('type')} — {f.get('attack')}\" at {f.get('file')}:{f.get('line')}.\n\n"
         f"Cited code (line-numbered):\n{code}\n\n"
@@ -329,18 +358,19 @@ def render(paths: list[str], findings: list[dict], confirmed: list[dict], refute
 
 
 # ── SARIF triage (verify/refute an existing scanner's findings) ──────────────────
-def _go_basename_index(repo: str) -> dict:
+def _basename_index(repo: str, lang: str) -> dict:
+    exts = LANGS[lang]["exts"]
     idx: dict = {}
     for dp, _, fs in os.walk(repo):
         if os.sep + ".git" in dp:
             continue
         for f in fs:
-            if f.endswith(".go"):
+            if f.endswith(exts):
                 idx.setdefault(f, []).append(os.path.relpath(os.path.join(dp, f), repo))
     return idx
 
 
-def load_sarif(path: str, repo: str) -> list[dict]:
+def load_sarif(path: str, repo: str, lang: str = "go") -> list[dict]:
     """Parse a SARIF file (gosec / semgrep / CodeQL) into findings for the verify pipeline. Resolves
     each location to a real repo file — some scanners (e.g. gosec) emit only the basename, so we map
     it back via a basename index. An ambiguous (same basename in >1 dir) or unknown path is left
@@ -349,7 +379,7 @@ def load_sarif(path: str, repo: str) -> list[dict]:
         doc = json.load(open(path))
     except Exception as e:  # noqa: BLE001
         sys.exit(f"error: cannot read SARIF {path}: {e}")
-    idx = _go_basename_index(repo)
+    idx = _basename_index(repo, lang)
     level_to_sev = {"error": "high", "warning": "medium", "note": "low", "none": "low"}
 
     def _resolve(uri: str) -> str:
@@ -389,6 +419,9 @@ def main() -> int:
     ap.add_argument("--concurrency", type=int, default=6)
     ap.add_argument("--sarif", default=None,
                     help="triage an existing scanner's SARIF (gosec/semgrep/CodeQL) instead of auditing from scratch")
+    ap.add_argument("--lang", choices=list(LANGS), default="go",
+                    help="source language. Go gets deterministic dead-code reachability; the rest "
+                         "(python/javascript/typescript) rely on the adversarial verify.")
     ap.add_argument("--out", default="audit-report.md")
     ap.add_argument("--fail-on", choices=["never", "confirmed"], default="never")
     a = ap.parse_args()
@@ -399,14 +432,14 @@ def main() -> int:
     cli = make_client()
 
     if a.sarif:                                  # triage mode: findings come from the scanner
-        findings = load_sarif(a.sarif, repo)
+        findings = load_sarif(a.sarif, repo, a.lang)
         audit_failed, audit_total = 0, 0
-        scope = [f"SARIF triage: {os.path.basename(a.sarif)}"]
+        scope = [f"SARIF triage: {os.path.basename(a.sarif)} ({a.lang})"]
         print(f"[info] loaded {len(findings)} finding(s) from SARIF", file=sys.stderr)
     else:                                        # audit mode: a strong agent raises findings
-        files = changed_go_files(repo, a.diff) if a.diff else expand(repo, a.paths or [])
+        files = changed_files(repo, a.diff, a.lang) if a.diff else expand(repo, a.paths or [], a.lang)
         if not files:
-            open(a.out, "w").write("# Verified Audit Report\n\n_no Go files in scope_\n")
+            open(a.out, "w").write(f"# Verified Audit Report\n\n_no {a.lang} source files in scope_\n")
             return 0
         findings, audit_failed, audit_total = run_audit(cli, repo, files, a.audit_model)
         scope = files if a.diff else (a.paths or [])
@@ -415,13 +448,13 @@ def main() -> int:
         open(a.out, "w").write("# Verified Audit Report\n\n_no findings to verify_\n")
         return 0
 
-    dead = load_deadcode(repo)
+    dead = load_deadcode(repo, a.lang)
 
     # pure-code reachability: dead-code findings are auto-refuted (no LLM call). Match by
     # (repo-relpath, enclosing-func decl line) — precise position avoids same-name false matches.
     auto_refuted, to_verify = [], []
     for f in findings:
-        fn, fn_line = enclosing_func(repo, f.get("file", ""), _safe_int(f.get("line")))
+        fn, fn_line = enclosing_func(repo, f.get("file", ""), _safe_int(f.get("line")), a.lang)
         key = (_norm_repo_path(f.get("file", ""), repo), fn_line)
         if dead is not None and fn_line and key in dead:
             auto_refuted.append({**f, "verdict": {"real": False, "severity": "low",
@@ -432,7 +465,7 @@ def main() -> int:
     print(f"[info] auto-refuted {len(auto_refuted)} dead-code finding(s); {len(to_verify)} to LLM verify", file=sys.stderr)
 
     with ThreadPoolExecutor(max_workers=a.concurrency) as ex:
-        verdicts = list(ex.map(lambda f: verify_one(cli, repo, f, a.verify_model), to_verify))
+        verdicts = list(ex.map(lambda f: verify_one(cli, repo, f, a.verify_model, a.lang), to_verify))
 
     # verify failure (empty verdict) → inconclusive, NOT silently bucketed into refuted (would be a
     # false-negative: a real finding dropped because the verify API hiccupped).

@@ -20,7 +20,7 @@
 
 ## 核心想法
 
-1. **可達性是確定性工具的活,不是 LLM 的。** [`deadcode`](https://pkg.go.dev/golang.org/x/tools/cmd/deadcode) 建全程式呼叫圖;落在「確定不可達」函式裡的發現,**不花一次 LLM call 就 auto-refute**。LLM 是被「告知」可達性、而非用猜的 —— 這就是壓掉大多數誤報的關鍵。
+1. **可達性是確定性工具的活,不是 LLM 的。** [`deadcode`](https://pkg.go.dev/golang.org/x/tools/cmd/deadcode) 建全程式呼叫圖;落在「確定不可達」函式裡的發現,**不花一次 LLM call 就 auto-refute**。LLM 是被「告知」可達性、而非用猜的 —— 這就是壓掉大多數誤報的關鍵。(這步**刻意只做 Go** —— 它需要 *sound* 的呼叫圖;Python/JS/TS 就靠 verify 撐。見 [`--lang`](tool/README.md#languages---lang)。)
 
 2. **驗證是 load-bearing 的。** 每條發現都要過 (a) 確定性檢查 —— 引用的 `file:line` 真的含那個構造 —— 和 (b) 一個對抗式 skeptic 試著推翻它、不確定就預設「不是洞」。LLM 自評會 over-claim;這一步才讓輸出在無人盯著時可信。
 
@@ -46,6 +46,8 @@ python tool/verified_audit.py \
 接進 Gitea / GitHub Actions 當**出貨前安全 gate**,見 [`tool/README.md`](tool/README.md)。
 
 **或者,指向你本來就在跑的掃描器。** `--sarif gosec.sarif` 把同一套 verify + 可達性層套在 gosec / semgrep / CodeQL 的輸出上,**砍掉它們的誤報**(還附理由)—— 通常這才是最划算的用法,因為多數團隊都被 SAST 噪音淹死。在開源的 [ffuf](https://github.com/ffuf/ffuf) 上,這把 gosec 的 **25 條砍掉 16 條誤報**、每條附理由、留下真的([實例](examples/triage-demo.md))。
+
+**其他語言**:audit / verify / triage 也跑 **Python、JavaScript、TypeScript**(`--lang`),triage 走 `--sarif` 則 semgrep/CodeQL 吐 SARIF 的語言都吃。只有 deterministic dead-code reachability 維持 Go-only(需要 sound 呼叫圖),其餘全部通用。
 
 ## 這東西為什麼存在(一段誠實話)
 

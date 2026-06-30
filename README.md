@@ -20,7 +20,7 @@ The pieces reinforce each other: the benchmark is *why you should trust the meth
 
 ## The core idea
 
-1. **Reachability is a job for deterministic tools, not the LLM.** [`deadcode`](https://pkg.go.dev/golang.org/x/tools/cmd/deadcode) builds a whole-program call graph; a finding inside a provably-unreachable function is **auto-refuted without an LLM call**. The LLM is *told* the reachability instead of guessing it — which is what kills most false positives.
+1. **Reachability is a job for deterministic tools, not the LLM.** [`deadcode`](https://pkg.go.dev/golang.org/x/tools/cmd/deadcode) builds a whole-program call graph; a finding inside a provably-unreachable function is **auto-refuted without an LLM call**. The LLM is *told* the reachability instead of guessing it — which is what kills most false positives. (This step is Go-only on purpose — it needs a *sound* call graph; for Python/JS/TS the verify pass carries the load. See [`--lang`](tool/README.md#languages---lang).)
 
 2. **Verification is load-bearing.** Every finding must survive (a) a deterministic check — the cited `file:line` really contains the claimed construct — and (b) an adversarial skeptic that tries to *refute* it, defaulting to not-a-bug. LLM self-assessment over-claims; this step is what makes the output safe to trust when no human is watching.
 
@@ -46,6 +46,8 @@ python tool/verified_audit.py \
 To wire it into Gitea / GitHub Actions as a **pre-ship security gate**, see [`tool/README.md`](tool/README.md).
 
 **Or point it at a scanner you already run.** `--sarif gosec.sarif` applies the same verify + reachability layer to gosec / semgrep / CodeQL output to **kill their false positives** (with reasons attached) — usually the cheapest high-value use, since most teams drown in SAST noise. On the open-source [ffuf](https://github.com/ffuf/ffuf), this refuted **16 of gosec's 25 findings** as false positives, each with a reason, keeping the real ones ([worked example](examples/triage-demo.md)).
+
+**Other languages.** Audit, verify, and triage also run on **Python, JavaScript, and TypeScript** (`--lang`), and triage over `--sarif` works on anything semgrep/CodeQL emits SARIF for. The deterministic dead-code reachability stays Go-only (it needs a sound call graph); everything else carries across.
 
 ## Why this exists (an honesty note)
 
