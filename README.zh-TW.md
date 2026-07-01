@@ -2,6 +2,8 @@
 
 # verified-audit
 
+[![ci](https://github.com/asd3358123/verified-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/asd3358123/verified-audit/actions/workflows/ci.yml)
+
 **做程式碼安全稽核時,「單一強 agent + load-bearing 驗證」在 recall 上跟 multi-agent fan-out 打平 —— 但成本只要 1/8。這個 repo 給你方法、證據、和一個能跑的 Go CI 工具。**
 
 多數「AI 程式碼稽核」不是用一堆幻覺發現淹死你,就是 fan-out 成幾十個 agent、賭「量 = recall」。這個 repo 主張、而且**實際量測**了相反的事:
