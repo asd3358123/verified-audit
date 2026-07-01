@@ -33,6 +33,14 @@ This is the part most pipelines get wrong, and it is what makes the output safe 
 - If an **audit batch** fails to parse, the scan is **incomplete** — say so loudly (a banner), because "no findings" from a failed call is indistinguishable from "no findings because the code is clean."
 - In a hard-gate mode, an incomplete scan must **not** pass.
 
+### The failure moves up a level: watch the *rate*
+
+Fail-loud is a **per-run** property, and "surface it" is necessary but not sufficient once the gate runs **unattended** — scheduled triage, a fleet of repos, or the advisory (report-only) phase every rollout starts in. A single red run is visible; a *slow creep* in how often runs come back inconclusive is not. Nobody is watching the trend, so the failure just moves up a level — from "a finding silently dropped" to "the scan silently degrading."
+
+So treat the run counts as an **SLI**. `inconclusive / raised` and `audit_failed / audit_total` are the numbers to watch: a rising inconclusive rate means the verify provider is degrading, a model got deprecated, or path resolution is silently breaking — i.e. **false-negative risk is climbing**, the exact direction this whole method exists to avoid. Emit the counts every run, scrape them into whatever metrics backend you already run, and alert when the rate drifts above baseline. Keep no history *in the gate itself* — it makes the number available; the operator aggregates. (Aggregate the raw counts across runs; don't average the per-run rates — the denominators differ.)
+
+The tool implements exactly this split: `--json-summary` writes the per-run counts + rates as JSON; storage and alerting are left to your observability stack.
+
 ## 4. Report
 
 Output only the verified findings (each with `file:line`, the concrete attack, the verifier's reason). Then list the **refuted** findings and why — transparency is what makes the report trustworthy. Give **inconclusive** findings their own section so they aren't mistaken for cleared, and put an **⚠️ scan incomplete** banner at the top if any audit batch failed. End with one line of confidence: *"N findings, each verified deterministically + adversarially; M refuted; K inconclusive."*

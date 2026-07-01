@@ -52,6 +52,7 @@ python verified_audit.py --repo /path/to/repo --sarif semgrep.sarif --lang types
 | `--concurrency` | `6` | parallel verify calls |
 | `--fail-on` | `never` | `confirmed` → exit 1 on a confirmed finding **or an incomplete scan** |
 | `--out` | `audit-report.md` | report path |
+| `--json-summary` | — | also write machine-readable run counts + rates (JSON) here, for scraping into a metrics backend — see below |
 
 The report has **Confirmed / Inconclusive / Refuted** sections; if an audit batch failed to parse it carries a `⚠️ SCAN INCOMPLETE` banner. `[info] auto-refuted N` on stderr tells you the dead-code refute actually fired.
 
@@ -64,6 +65,22 @@ The report has **Confirmed / Inconclusive / Refuted** sections; if an audit batc
 5. ⚠️ **The workflow must exist on the branch you push.** Actions reads the workflow from the pushed ref — putting it on `main` does not gate pushes to a long-lived `release` branch unless `release` also has the file.
 
 Start `--fail-on never` (advisory: report only). Flip to `--fail-on confirmed` once you trust it.
+
+## Monitor the inconclusive rate (unattended runs)
+
+Fail-loud is a *per-run* property: a failed verify surfaces as **inconclusive**, a failed audit batch flips the **⚠️ SCAN INCOMPLETE** banner, and under `--fail-on confirmed` either fails the gate. But once this runs unattended — scheduled, across a fleet, or in the advisory phase — a single red run is visible while a *slow creep* in the inconclusive rate is not. That rate is a second-order SLI: when it climbs, your verify provider is degrading or path resolution is silently breaking, i.e. false-negative risk is rising — the exact thing this tool exists to prevent.
+
+`--json-summary` makes the numbers scrapeable (the tool keeps no history itself — your metrics stack does):
+
+```bash
+python verified_audit.py --repo . --diff <base_sha> --out report.md --json-summary summary.json
+cat summary.json
+# { "raised": 12, "confirmed": 3, "refuted": 7, "inconclusive": 2,
+#   "audit_failed": 0, "audit_total": 1, "incomplete": true,
+#   "inconclusive_rate": 0.1667, "audit_fail_rate": 0.0 }
+```
+
+A summary is written on **every** run (including clean / no-files runs, as all-zeros) so the time series has no gaps. Push it wherever you already alert — Prometheus pushgateway, CloudWatch, a BigQuery row — and alert when `inconclusive_rate` / `audit_fail_rate` drifts above baseline. Aggregate the raw counts across runs; don't average the per-run rates (the denominators differ).
 
 ## Cost
 

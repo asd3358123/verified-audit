@@ -357,6 +357,28 @@ def render(paths: list[str], findings: list[dict], confirmed: list[dict], refute
     return "\n".join(L) + "\n"
 
 
+def write_json_summary(path: str, *, scope: list, raised: int, confirmed: int, refuted: int,
+                       inconclusive: int, audit_failed: int, audit_total: int) -> None:
+    """Emit machine-readable run counts so a scheduled / fleet runner can scrape them into its own
+    metrics backend. Fail-loud is a PER-RUN property; over unattended runs the *rate* of inconclusive /
+    failed scans is a second-order SLI — a rising inconclusive rate means the verify provider is
+    degrading, a model got deprecated, or path resolution is silently breaking: false-negative risk is
+    climbing, the exact direction this method exists to avoid. The tool keeps no history on purpose —
+    it makes the number available, the operator aggregates (aggregate the raw counts across runs; do
+    NOT average the per-run rates — the denominators differ)."""
+    summary = {
+        "scope": scope,
+        "raised": raised, "confirmed": confirmed, "refuted": refuted, "inconclusive": inconclusive,
+        "audit_failed": audit_failed, "audit_total": audit_total,
+        "incomplete": bool(audit_failed) or bool(inconclusive),
+        "inconclusive_rate": round(inconclusive / raised, 4) if raised else 0.0,
+        "audit_fail_rate": round(audit_failed / audit_total, 4) if audit_total else 0.0,
+    }
+    with open(path, "w") as fh:
+        json.dump(summary, fh, indent=2)
+    print("[summary] " + json.dumps(summary), file=sys.stderr)
+
+
 # ── SARIF triage (verify/refute an existing scanner's findings) ──────────────────
 def _basename_index(repo: str, lang: str) -> dict:
     exts = LANGS[lang]["exts"]
@@ -423,6 +445,11 @@ def main() -> int:
                     help="source language. Go gets deterministic dead-code reachability; the rest "
                          "(python/javascript/typescript) rely on the adversarial verify.")
     ap.add_argument("--out", default="audit-report.md")
+    ap.add_argument("--json-summary", default=None,
+                    help="also write machine-readable run counts (raised/confirmed/refuted/inconclusive/"
+                         "audit_failed/audit_total + rates) here. Scrape into your metrics backend: the "
+                         "inconclusive / audit-fail rate over unattended runs is a second-order SLI — "
+                         "alert when it drifts above baseline (rising rate = rising false-negative risk).")
     ap.add_argument("--fail-on", choices=["never", "confirmed"], default="never")
     a = ap.parse_args()
     if not a.paths and not a.diff and not a.sarif:
@@ -440,12 +467,30 @@ def main() -> int:
         files = changed_files(repo, a.diff, a.lang) if a.diff else expand(repo, a.paths or [], a.lang)
         if not files:
             open(a.out, "w").write(f"# Verified Audit Report\n\n_no {a.lang} source files in scope_\n")
+            if a.json_summary:
+                write_json_summary(a.json_summary, scope=(a.paths or []), raised=0, confirmed=0,
+                                   refuted=0, inconclusive=0, audit_failed=0, audit_total=0)
             return 0
         findings, audit_failed, audit_total = run_audit(cli, repo, files, a.audit_model)
         scope = files if a.diff else (a.paths or [])
 
     if not findings:
+        # An incomplete audit (a batch failed to parse) with zero parsed findings must NOT read as a
+        # clean scan — "no findings from a failed call" is indistinguishable from "no findings because
+        # the code is clean", the false-negative this tool exists to prevent. Route it through render()
+        # so the SCAN INCOMPLETE banner shows and, under --fail-on confirmed, the gate fails.
+        if audit_failed:
+            md = render(scope, [], [], [], [], audit_failed, audit_total)
+            open(a.out, "w").write(md)
+            print(md)
+            if a.json_summary:
+                write_json_summary(a.json_summary, scope=scope, raised=0, confirmed=0, refuted=0,
+                                   inconclusive=0, audit_failed=audit_failed, audit_total=audit_total)
+            return 1 if a.fail_on == "confirmed" else 0
         open(a.out, "w").write("# Verified Audit Report\n\n_no findings to verify_\n")
+        if a.json_summary:
+            write_json_summary(a.json_summary, scope=scope, raised=0, confirmed=0, refuted=0,
+                               inconclusive=0, audit_failed=0, audit_total=audit_total)
         return 0
 
     dead = load_deadcode(repo, a.lang)
@@ -485,6 +530,10 @@ def main() -> int:
     with open(a.out, "w") as fh:
         fh.write(md)
     print(md)
+    if a.json_summary:
+        write_json_summary(a.json_summary, scope=scope, raised=len(findings), confirmed=len(confirmed),
+                           refuted=len(refuted), inconclusive=len(inconclusive),
+                           audit_failed=audit_failed, audit_total=audit_total)
     # gate: when enabled, an incomplete scan (audit batch / verify failure) must NOT pass silently.
     incomplete = audit_failed > 0 or bool(inconclusive)
     if a.fail_on == "confirmed" and (confirmed or incomplete):

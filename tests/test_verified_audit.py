@@ -156,3 +156,27 @@ def test_render_confirmed_finding():
                   "attack": "inject", "verdict": {"real": True, "severity": "high", "reason": "yep"}}]
     md = va.render(["scope"], confirmed, confirmed, [], [], 0, 0)
     assert "HIGH" in md and "a.go:10" in md and "yep" in md
+
+
+# ── json summary: the inconclusive/fail rate is a second-order SLI to alert on ────
+def test_json_summary_counts_rates_and_incomplete(tmp_path):
+    p = tmp_path / "summary.json"
+    va.write_json_summary(str(p), scope=["./x"], raised=10, confirmed=2, refuted=5,
+                          inconclusive=3, audit_failed=1, audit_total=4)
+    d = json.loads(p.read_text())
+    assert (d["raised"], d["confirmed"], d["refuted"], d["inconclusive"]) == (10, 2, 5, 3)
+    assert (d["audit_failed"], d["audit_total"]) == (1, 4)
+    assert d["incomplete"] is True
+    assert d["inconclusive_rate"] == 0.3       # 3/10
+    assert d["audit_fail_rate"] == 0.25        # 1/4
+
+
+def test_json_summary_zero_denominator_no_div_by_zero(tmp_path):
+    # a clean run (raised=0, audit_total=0) must emit a data point with rate 0.0, not crash — the
+    # time series needs a point every run or you can't compute a trend.
+    p = tmp_path / "s.json"
+    va.write_json_summary(str(p), scope=[], raised=0, confirmed=0, refuted=0,
+                          inconclusive=0, audit_failed=0, audit_total=0)
+    d = json.loads(p.read_text())
+    assert d["inconclusive_rate"] == 0.0 and d["audit_fail_rate"] == 0.0
+    assert d["incomplete"] is False

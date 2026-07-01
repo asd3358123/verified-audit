@@ -54,6 +54,7 @@ jobs:
             --audit-model anthropic/claude-sonnet-4.6 \
             --verify-model anthropic/claude-sonnet-4.6 \
             --fail-on never \
+            --json-summary audit-summary.json \
             --out audit-report.md
 
       # Gitea (GHES-like) does not support upload-artifact@v4 — write to the job summary instead.
@@ -61,6 +62,23 @@ jobs:
         if: always()
         run: |
           if [ -f audit-report.md ]; then cat audit-report.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      # Fail-loud is per-run; the inconclusive/fail RATE over unattended runs is a second-order SLI.
+      # Ship audit-summary.json to your metrics backend and alert when the rate creeps above baseline
+      # (rising rate = rising false-negative risk). Example — push to a Prometheus pushgateway:  <--
+      # - name: publish audit SLIs
+      #   if: always()
+      #   run: |
+      #     [ -f audit-summary.json ] || exit 0
+      #     python - <<'PY' | curl --data-binary @- "$PUSHGATEWAY_URL/metrics/job/verified_audit/repo/$GITHUB_REPOSITORY"
+      #     import json
+      #     s = json.load(open("audit-summary.json"))
+      #     for k in ("raised","confirmed","refuted","inconclusive","audit_failed","audit_total",
+      #               "inconclusive_rate","audit_fail_rate"):
+      #         print(f"verified_audit_{k} {s[k]}")
+      #     PY
+      #   env:
+      #     PUSHGATEWAY_URL: ${{ secrets.PUSHGATEWAY_URL }}
 
       # To turn it into a hard gate: change --fail-on never to --fail-on confirmed
       # (exits 1 on a confirmed finding OR an incomplete scan). Start advisory.
