@@ -7,6 +7,8 @@ calls are intentionally not exercised here (they need an API key and are non-det
 import json
 import os
 
+import pytest
+
 import verified_audit as va
 
 
@@ -169,6 +171,60 @@ def test_json_summary_counts_rates_and_incomplete(tmp_path):
     assert d["incomplete"] is True
     assert d["inconclusive_rate"] == 0.3       # 3/10
     assert d["audit_fail_rate"] == 0.25        # 1/4
+
+
+# ── scope resolution fails loud: an unscanned input must never read as "clean" ────
+def test_changed_files_bad_diff_fails_loud(tmp_path):
+    # not a git repo → git diff fails. An empty file list here would let the gate pass on a change
+    # it never scanned (the classic shallow-clone-in-CI failure).
+    with pytest.raises(SystemExit):
+        va.changed_files(str(tmp_path), "deadbeef", "go")
+
+
+def test_expand_nonexistent_path_fails_loud(tmp_path):
+    with pytest.raises(SystemExit):
+        va.expand(str(tmp_path), ["no/such/dir"], "go")
+
+
+def test_expand_existing_dir_still_works(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.go").write_text("package a\n")
+    assert va.expand(str(tmp_path), ["pkg"], "go") == [os.path.join("pkg", "a.go")]
+
+
+def test_run_audit_non_list_findings_counts_batch_failed(tmp_path, monkeypatch):
+    # "findings" present but not a list = a batch that parsed wrong; it must count as FAILED,
+    # not as a successful batch that found nothing.
+    (tmp_path / "a.go").write_text("package a\n")
+    monkeypatch.setattr(va, "chat", lambda *a, **k: {"findings": "not-a-list"})
+    findings, failed, total = va.run_audit(None, str(tmp_path), ["a.go"], "m")
+    assert findings == [] and failed == 1 and total == 1
+
+
+def test_sarif_result_without_location_is_kept_not_dropped(tmp_path):
+    # a scanner result with no location must still surface (as inconclusive at verify time),
+    # never be silently erased.
+    s = tmp_path / "s.sarif"
+    s.write_text(json.dumps({"runs": [{"tool": {"driver": {"name": "gosec"}}, "results": [
+        {"ruleId": "G1", "level": "warning", "message": {"text": "msg"}, "locations": []}]}]}))
+    fs = va.load_sarif(str(s), str(tmp_path), "go")
+    assert len(fs) == 1
+    assert fs[0]["file"] == "(no location)"
+
+
+# ── bucket_verdicts: REFUTED requires an explicit real=false ─────────────────────
+def test_bucket_verdicts_degraded_verdict_is_inconclusive():
+    verdicts = [
+        {"id": "yes", "verdict": {"real": True, "reason": "r"}},
+        {"id": "no", "verdict": {"real": False, "reason": "r"}},
+        {"id": "empty", "verdict": {}},
+        {"id": "no-real-key", "verdict": {"severity": "high", "reason": "partial parse"}},
+        {"id": "non-bool", "verdict": {"real": "yes"}},
+    ]
+    confirmed, refuted, inconclusive = va.bucket_verdicts(verdicts)
+    assert [v["id"] for v in confirmed] == ["yes"]
+    assert [v["id"] for v in refuted] == ["no"]
+    assert [v["id"] for v in inconclusive] == ["empty", "no-real-key", "non-bool"]
 
 
 def test_json_summary_zero_denominator_no_div_by_zero(tmp_path):

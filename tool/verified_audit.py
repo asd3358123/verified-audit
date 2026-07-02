@@ -162,12 +162,23 @@ def expand(repo: str, paths: list[str], lang: str) -> list[str]:
                 out += [os.path.relpath(os.path.join(dp, f), repo) for f in fs if _auditable(f, lang)]
         elif _auditable(ap, lang) and os.path.isfile(ap):
             out.append(p)
+        elif not os.path.exists(ap):
+            # a typo'd / renamed --paths entry silently auditing nothing = the gate scans less than
+            # the operator believes, and "no findings" reads as clean. Config errors fail loud.
+            sys.exit(f"error: --paths entry does not exist: {p}")
+        else:
+            print(f"[warn] --paths entry matched no auditable {lang} file: {p}", file=sys.stderr)
     return sorted(set(out))
 
 
 def changed_files(repo: str, base: str, lang: str) -> list[str]:
     r = subprocess.run(["git", "-C", repo, "diff", "--name-only", f"{base}...HEAD"],
                        capture_output=True, text=True)
+    if r.returncode != 0:
+        # a failed diff (bad base SHA, or a shallow clone that doesn't have it) must not read as
+        # "no files changed" — the gate would pass on an unscanned change. Fail loud instead.
+        sys.exit(f"error: git diff {base}...HEAD failed — bad base SHA, or a shallow clone? "
+                 f"(actions/checkout needs fetch-depth: 0)\n{r.stderr.strip()}")
     return [p for p in r.stdout.splitlines()
             if _auditable(p, lang) and os.path.isfile(os.path.join(repo, p))]
 
@@ -215,6 +226,12 @@ def load_deadcode(repo: str, lang: str = "go") -> set | None:
         r = subprocess.run([b, "./..."], cwd=repo, capture_output=True, text=True, timeout=600)
     except Exception as e:  # noqa: BLE001
         print(f"[warn] deadcode failed ({e}) — dead-code auto-refute disabled", file=sys.stderr)
+        return None
+    if r.returncode != 0:
+        # non-zero exit (e.g. the repo doesn't build) means the output is not a verdict; an empty
+        # set here would print "0 unreachable funcs" as if deadcode had actually run. Disable it.
+        print(f"[warn] deadcode exited {r.returncode} — dead-code auto-refute disabled: "
+              f"{r.stderr.strip()[:200]}", file=sys.stderr)
         return None
     dead: set = set()
     for ln in r.stdout.splitlines():
@@ -284,13 +301,14 @@ def run_audit(cli: OpenAI, repo: str, files: list[str], model: str) -> tuple[lis
             '"evidence":"<verbatim offending line>"}]}'
         )
         resp = chat(cli, model, AUDIT_SYS, user)
-        if not isinstance(resp, dict) or "findings" not in resp:
+        # "findings" present but not a list is the same failure as no "findings" at all — a batch
+        # that parsed wrong must count as FAILED, not as a successful batch that found nothing.
+        fs = resp.get("findings") if isinstance(resp, dict) else None
+        if not isinstance(fs, list):
             failed += 1
             print(f"[warn] audit batch {i}/{len(bs)} failed to parse (API/parse error) — scan incomplete", file=sys.stderr)
             continue
-        fs = resp.get("findings", [])
-        if isinstance(fs, list):
-            findings += [f for f in fs if isinstance(f, dict) and f.get("file")]
+        findings += [f for f in fs if isinstance(f, dict) and f.get("file")]
     return findings, failed, len(bs)
 
 
@@ -315,6 +333,26 @@ def verify_one(cli: OpenAI, repo: str, f: dict, model: str, lang: str = "go") ->
     )
     v = chat(cli, model, VERIFY_SYS, user)
     return {**f, "verdict": v if isinstance(v, dict) else {}}
+
+
+def bucket_verdicts(verdicts: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    """Bucket verify results into (confirmed, refuted, inconclusive). A finding counts as REFUTED
+    only when the model explicitly said `real: false` (a bool). An empty verdict, a missing `real`,
+    or a non-bool value is a degraded/partially-parsed response → INCONCLUSIVE — silently bucketing
+    it into refuted would drop a possibly-real finding because the verify call hiccupped, the exact
+    false-negative this tool exists to prevent."""
+    confirmed: list[dict] = []
+    refuted: list[dict] = []
+    inconclusive: list[dict] = []
+    for v in verdicts:
+        real = (v.get("verdict") or {}).get("real")
+        if not isinstance(real, bool):
+            inconclusive.append(v)
+        elif real:
+            confirmed.append(v)
+        else:
+            refuted.append(v)
+    return confirmed, refuted, inconclusive
 
 
 # ── report ──────────────────────────────────────────────────────────────────────
@@ -418,7 +456,9 @@ def load_sarif(path: str, repo: str, lang: str = "go") -> list[dict]:
             loc = ((r.get("locations") or [{}])[0] or {}).get("physicalLocation", {})
             uri = (loc.get("artifactLocation") or {}).get("uri") or ""
             if not uri:
-                continue
+                # a result with no location must still surface — dropping it here would silently
+                # erase a scanner finding. With no file to open, verify_one reports it INCONCLUSIVE.
+                uri = "(no location)"
             out.append({
                 "file": _resolve(uri),
                 "line": (loc.get("region") or {}).get("startLine") or 0,
@@ -512,17 +552,10 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=a.concurrency) as ex:
         verdicts = list(ex.map(lambda f: verify_one(cli, repo, f, a.verify_model, a.lang), to_verify))
 
-    # verify failure (empty verdict) → inconclusive, NOT silently bucketed into refuted (would be a
-    # false-negative: a real finding dropped because the verify API hiccupped).
-    confirmed, refuted, inconclusive = [], list(auto_refuted), []
-    for v in verdicts:
-        verdict = v.get("verdict") or {}
-        if not verdict:
-            inconclusive.append(v)
-        elif verdict.get("real"):
-            confirmed.append(v)
-        else:
-            refuted.append(v)
+    # verify failure / degraded verdict → inconclusive, NOT silently bucketed into refuted (would
+    # be a false-negative: a real finding dropped because the verify API hiccupped) — see bucket_verdicts.
+    confirmed, llm_refuted, inconclusive = bucket_verdicts(verdicts)
+    refuted = auto_refuted + llm_refuted
     if inconclusive:
         print(f"[warn] {len(inconclusive)} finding(s) could not be verified (LLM failure) — reported as inconclusive", file=sys.stderr)
 
